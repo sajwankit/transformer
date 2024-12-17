@@ -1,0 +1,5 @@
+data:
+  data_path: '/Users/ankitsajwan/tech/projects/transformer/data/tinyshakespeare.txt'
+  block_size: 8 #chunk size
+  batch_size: 4
+  train_val_split: 0.9
