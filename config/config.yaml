@@ -1,11 +1,12 @@
 seed: 1337
 data:
   data_path: '/Users/ankitsajwan/tech/projects/transformer/data/tinyshakespeare.txt'
-  block_size: 8 #chunk size
-  batch_size: 32
+  chunk_size: 8 #chunk size
+  batch_size: 16
   train_val_split: 0.9
 
 model:
   device: "cpu"
   learning_rate: 0.001
   epochs: 10
+  token_emb_size: 32

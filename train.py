@@ -14,11 +14,13 @@ class Trainer:
         self.device = config["model"]["device"]
         self.model = GPT(config, n_tokens=n_tokens).to(self.device)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config["model"]["learning_rate"])
+        self.batch_size = config["data"]["batch_size"]
 
     def train_one_epoch(self):
         self.model.train()
         epoch_loss = 0
         for train_data in train_dataloader:
+            if train_data[0].shape[0] != config["data"]["batch_size"]: continue
             # train_data = [x.to(self.device) for x in train_data]# move input data to mps or gpu
             logits, loss = self.model(x=train_data[0], y=train_data[1])
 
@@ -37,6 +39,7 @@ class Trainer:
         epoch_loss = 0
         with torch.no_grad():
             for val_data in val_dataloader:
+                if val_data[0].shape[0] != config["data"]["batch_size"]: continue
                 # val_data = [x.to(self.device) for x in val_data]# move input data to mps or gpu
                 logits, loss = self.model(x=val_data[0], y=val_data[1])
                 epoch_loss += loss.item()
@@ -59,14 +62,14 @@ if __name__ == "__main__":
     n_tokens = len(train_dataset.char_to_token_map)
     trainer = Trainer(config, train_dataloader, val_dataloader, n_tokens)
 
-    def generated_text(x=torch.zeros((1,1), dtype=torch.long), max_new_tokens=500):
+    def generated_text(x=torch.zeros((32,1), dtype=torch.long), max_new_tokens=500):
         generated_tokens = trainer.model.generate(x, max_new_tokens).view(-1).tolist()
         return train_dataset.decoder(generated_tokens)
     print("*********before traininG***********)")
-    print(generated_text())
+    # print(generated_text())
     trainer.train(config["model"]["epochs"])
     print("************after training****************")
-    print(generated_text())  
+    # print(generated_text())  
     
     
     
