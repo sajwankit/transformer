@@ -22,7 +22,7 @@ class TinyShakespeareDataset(Dataset):
             self.data_tokens = self.encoder(self.data[:split_end])
         else:
             self.data_tokens = self.encoder(self.data[split_end: ])
-        self.block_size = config["data"]["block_size"]
+        self.chunk_size = config["data"]["chunk_size"]
         
         # self.encoding = tiktoken.get_encoding("gpt2")
         # self.encoding.encode(self.data)
@@ -36,15 +36,15 @@ class TinyShakespeareDataset(Dataset):
         return text
 
     def __getitem__(self, idx):
-        x = torch.from_numpy(self.data_tokens[idx: idx+self.block_size].astype(np.int64))
-        y = torch.from_numpy(self.data_tokens[idx+1: idx+self.block_size+1].astype(np.int64)) 
+        x = torch.from_numpy(self.data_tokens[idx: idx+self.chunk_size].astype(np.int64))
+        y = torch.from_numpy(self.data_tokens[idx+1: idx+self.chunk_size+1].astype(np.int64)) 
         return x.to(self.device), y.to(self.device)
     
     def __len__(self):
         """
         returns max length which is possible
         """
-        return len(self.data_tokens) - self.block_size
+        return len(self.data_tokens) - self.chunk_size
     
 if __name__=="__main__":
     from torch.utils.data import DataLoader

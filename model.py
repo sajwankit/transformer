@@ -56,7 +56,61 @@ class SimpleAverageSelfAttention(nn.Module):
         attention_output = attention_weights @ x
         return attention_output
         
+
+class SingleSelfAttentionHead(nn.Module):
+    """ one head of self-attention"""
+
+    def __init__(self, chunk_size, token_emb_dim, head_size):
+        super().__init__()
+        self.head_size = head_size
+        self.key = nn.Linear(token_emb_dim, head_size, bias=False)
+        self.query = nn.Linear(token_emb_dim, head_size, bias=False)
+        self.value = nn.Linear(token_emb_dim, head_size, bias=False)
+        self.register_buffer("causal_mask", torch.tril(torch.ones(chunk_size, chunk_size)))
+    
+    def forward(self, x):
+        batch_size, chunk_size, token_emb_dim = x.shape 
+        key_vector = self.key(x) # size will (batch_size, chunk_size, head_size)
+        query_vector = self.query(x) # size will (batch_size, chunk_size, head_size)
+
+        # compute attention weights 
+        attention_weights = query_vector @ key_vector.transpose(-2,-1) # size will be (batch_size, chunk_size, chunk_size)
+        #TODO: add comments why we do this
+        attention_weights = attention_weights * (self.head_size**-0.5)
+
+        attention_weights = attention_weights.masked_fill(self.causal_mask==0, -float('inf'))
+        attention_weights = F.softmax(attention_weights, dim=-1) 
+
+        value_vector = self.value(x) # size will (batch_size, chunk_size, head_size)
         
+        contextualised_embeddings = attention_weights @ value_vector # shape will be (batch_size, chunk_size, head_size)
+
+        return contextualised_embeddings
+
+class MultiHeadSelfAttention(nn.Module):
+    """multiple heads of self-attention in PARALLEL"""
+
+    def __init__(self, n_heads, chunk_size, token_emb_dim, head_size):
+        super().__init__()
+        single_attention_head = SingleSelfAttentionHead(chunk_size, token_emb_dim, head_size)
+        self.heads = nn.ModuleList([single_attention_head for _ in range(n_heads)])
+    
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
+class FeedForward(nn.Module):
+
+    def __init__(self, emb_dim_size):
+        super().__init__()
+        self.ff = nn.Sequential(
+            nn.Linear(emb_dim_size, emb_dim_size),
+            nn.ReLU()
+        )
+
+    def forward(self,x):
+        return self.ff(x)
+    
 
 class GPT(nn.Module):
 
@@ -72,9 +126,22 @@ class GPT(nn.Module):
         #TODO read how
         self.position_embedding_table = nn.Embedding(self.chunk_size, self.one_token_emb_size)
 
-        self.attention_layer = SimpleAverageSelfAttention(config)
+        # self.attention_layer = SimpleAverageSelfAttention(config)
+        
+        # self.attention_layer = SingleSelfAttentionHead(chunk_size=self.chunk_size, token_emb_dim=self.one_token_emb_size, head_size=config["model"]["self_attention_head_size"])
 
-        self.linear_layer = nn.Linear(self.one_token_emb_size, self.n_tokens) # but to compare to the final output, we would need n_tokens dimension
+        self.n_self_attention_heads = config["model"]["n_self_attention_heads"]
+        self.head_size = config["model"]["self_attention_head_size"]
+        self.attention_layer = MultiHeadSelfAttention(
+            n_heads=self.n_self_attention_heads,
+            chunk_size=self.chunk_size, 
+            token_emb_dim=self.one_token_emb_size, 
+            head_size=self.head_size 
+        )
+
+        self.ff = FeedForward(emb_dim_size=self.n_self_attention_heads*self.head_size)
+
+        self.linear_layer = nn.Linear(self.n_self_attention_heads*self.head_size, self.n_tokens) # but to compare to the final output, we would need n_tokens dimension
 
 
 
@@ -96,7 +163,9 @@ class GPT(nn.Module):
     
         contextualised_embeddings = self.attention_layer(token_embeddings)
 
-        logits = self.linear_layer(contextualised_embeddings)# shape of the logits will be (batch_size, chunk_size, n_tokens)
+        ff_output = self.ff(contextualised_embeddings)
+
+        logits = self.linear_layer(ff_output)# shape of the logits will be (batch_size, chunk_size, n_tokens)
 
         #cross entropy at backend applies a softmax to logits, 
         # softmax is applied to each token in the n_tokens dimension 
