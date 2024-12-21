@@ -95,9 +95,42 @@ class MultiHeadSelfAttention(nn.Module):
         head_size = token_emb_dim // n_heads
         single_attention_head = SingleSelfAttentionHead(chunk_size, token_emb_dim, head_size)
         self.heads = nn.ModuleList([single_attention_head for _ in range(n_heads)])
+
+        #TODO not clear why this is need for residual pathway, confirm below thinking
+        """
+        Without the Projection Layer:
+
+            If there were no projection layer, the output of the residual connection would simply be:
+
+
+            modeloutput = x + out1
+
+
+            where:
+                •	x is the input to the residual block.
+                •	\text{out1} is the output from the sub-layer (e.g., multi-head attention or feed-forward network).
+
+            In this case,  \text{out1}  is directly added to x without any learnable transformation.
+
+        With the Projection Layer:
+
+            When you add a projection layer (like self.proj), the output of the residual connection becomes:
+
+
+            modeloutput = x + (W * out1+ b)
+            By adding this transformation, the model can:
+                1.	Learn a more refined transformation of \text{out1} before adding it to x.
+                2.	Align dimensions if x and \text{out1} have different sizes.
+                3.	Adjust the scale or representation of \text{out1} to make the addition x + f{\prime}(\text{out1}) more meaningful.
+        
+        """
+        self.projection = nn.Linear(token_emb_dim, token_emb_dim)
+
     
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.projection(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -105,8 +138,9 @@ class FeedForward(nn.Module):
     def __init__(self, emb_dim_size):
         super().__init__()
         self.feed_forward = nn.Sequential(
-            nn.Linear(emb_dim_size, emb_dim_size),
-            nn.ReLU()
+            nn.Linear(emb_dim_size, 4 * emb_dim_size), # the 4 times in the inner layer added later per the transformer paper
+            nn.ReLU(),
+            nn.Linear(4 * emb_dim_size, emb_dim_size) # this layer is for residual projection
         )
 
     def forward(self,x):
@@ -129,8 +163,13 @@ class TransformerBlock(nn.Module):
         self.feed_forward = FeedForward(emb_dim_size=config["model"]["token_emb_size"])
     
     def forward(self, x):
-        x = self.multi_head_self_attn(x)
-        x = self.feed_forward(x)
+        # now you would notice that that our model has become quite deeeeeep, with multiple transformer blocks, and within each block, multiple heads
+        # use RESIDUAL CONNECTIONS TO HELP MODEL CONVERGE BETTER BY SOLVING VANISHING GRADIENT PROBLEM and other optimization issue 
+        # Deep networks without residual connections can suffer from degradation problems, 
+        # where adding more layers leads to worse performance (not due to overfitting, but because optimization becomes harder).
+        # Residual connections allow very deep networks to converge effectively, making them scalable to hundreds or thousands of layers.
+        x = x + self.multi_head_self_attn(x)
+        x = x + self.feed_forward(x)
         return x
 
 
