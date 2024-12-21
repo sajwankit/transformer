@@ -10,5 +10,4 @@ model:
   learning_rate: 0.001
   epochs: 10
   token_emb_size: 32
-  self_attention_head_size: 8
   n_self_attention_heads: 4

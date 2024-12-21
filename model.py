@@ -35,13 +35,13 @@ class SimpleAverageSelfAttention(nn.Module):
     
     def forward(self, x):
         # attention weights size is (batch_size, chunk_size, chunk_size)
-        # x which is the input, is basically the logits which we obtain with token_embedding_table, size is (batch_size, chunk_size, one_token_emb_size)
+        # x which is the input, is basically the logits which we obtain with token_embedding_table, size is (batch_size, chunk_size, token_emb_size)
         attention_weights = self.attention_weights.masked_fill(self.causal_mask==0, value=-float('inf')) # the mask would be broadcasted to all of the rows of the batch
         attention_weights = F.softmax(attention_weights, dim=-1)
 
-        # (batch_size, chunk_size, chunk_size) @ (batch_size, chunk_size, one_token_emb_size) --> (batch_size, chunk_size, one_token_emb_size)
-        # so let's say the first row of the batch --> (1, chunk_size, one_token_emb_size)
-        # attention layer outputs contextualised embeddings, what that means is that each token embedding in it (along the one_token_emb_size) is the output token after considering all the past tokens
+        # (batch_size, chunk_size, chunk_size) @ (batch_size, chunk_size, token_emb_size) --> (batch_size, chunk_size, token_emb_size)
+        # so let's say the first row of the batch --> (1, chunk_size, token_emb_size)
+        # attention layer outputs contextualised embeddings, what that means is that each token embedding in it (along the token_emb_size) is the output token after considering all the past tokens
 
         """
         To understand the role of contextualization, think of how the word “it” changes meaning depending on the sentence:
@@ -90,8 +90,9 @@ class SingleSelfAttentionHead(nn.Module):
 class MultiHeadSelfAttention(nn.Module):
     """multiple heads of self-attention in PARALLEL"""
 
-    def __init__(self, n_heads, chunk_size, token_emb_dim, head_size):
+    def __init__(self, n_heads, chunk_size, token_emb_dim):
         super().__init__()
+        head_size = token_emb_dim // n_heads
         single_attention_head = SingleSelfAttentionHead(chunk_size, token_emb_dim, head_size)
         self.heads = nn.ModuleList([single_attention_head for _ in range(n_heads)])
     
@@ -103,14 +104,35 @@ class FeedForward(nn.Module):
 
     def __init__(self, emb_dim_size):
         super().__init__()
-        self.ff = nn.Sequential(
+        self.feed_forward = nn.Sequential(
             nn.Linear(emb_dim_size, emb_dim_size),
             nn.ReLU()
         )
 
     def forward(self,x):
-        return self.ff(x)
+        return self.feed_forward(x)
     
+class TransformerBlock(nn.Module):
+    """transformer block: the self attention and feed forward are combined as a block, as these would be repeated in the model
+    so a transformer block conists of the communication (self attention) & computation (feed forward)
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.n_self_attention_heads = config["model"]["n_self_attention_heads"]
+        self.head_size = config["model"]["token_emb_size"] // self.n_self_attention_heads
+        self.multi_head_self_attn = MultiHeadSelfAttention(
+            n_heads=self.n_self_attention_heads,
+            chunk_size=config["data"]["chunk_size"],
+            token_emb_dim=config["model"]["token_emb_size"]
+        )
+        self.feed_forward = FeedForward(emb_dim_size=config["model"]["token_emb_size"])
+    
+    def forward(self, x):
+        x = self.multi_head_self_attn(x)
+        x = self.feed_forward(x)
+        return x
+
 
 class GPT(nn.Module):
 
@@ -119,27 +141,33 @@ class GPT(nn.Module):
         self.chunk_size = config["data"]["chunk_size"]
         self.n_tokens = n_tokens
         # we are learning an embedding for each token
-        self.one_token_emb_size = config["model"]["token_emb_size"]
-        self.token_embedding_table = nn.Embedding(num_embeddings=n_tokens, embedding_dim=self.one_token_emb_size) # so this a (n_tokens, one_token_emb_size) matrix
+        self.token_emb_size = config["model"]["token_emb_size"]
+        self.token_embedding_table = nn.Embedding(num_embeddings=n_tokens, embedding_dim=self.token_emb_size) # so this a (n_tokens, token_emb_size) matrix
         
         # token_embedding_table captures just the identity of the token, position embedding will capture the position of tokens in a chunk
         #TODO read how
-        self.position_embedding_table = nn.Embedding(self.chunk_size, self.one_token_emb_size)
+        self.position_embedding_table = nn.Embedding(self.chunk_size, self.token_emb_size)
 
         # self.attention_layer = SimpleAverageSelfAttention(config)
         
-        # self.attention_layer = SingleSelfAttentionHead(chunk_size=self.chunk_size, token_emb_dim=self.one_token_emb_size, head_size=config["model"]["self_attention_head_size"])
+        # self.attention_layer = SingleSelfAttentionHead(chunk_size=self.chunk_size, token_emb_dim=self.token_emb_size, head_size=config["model"]["self_attention_head_size"])
 
         self.n_self_attention_heads = config["model"]["n_self_attention_heads"]
-        self.head_size = config["model"]["self_attention_head_size"]
+        self.head_size = self.token_emb_size // self.n_self_attention_heads
         self.attention_layer = MultiHeadSelfAttention(
             n_heads=self.n_self_attention_heads,
             chunk_size=self.chunk_size, 
-            token_emb_dim=self.one_token_emb_size, 
-            head_size=self.head_size 
+            token_emb_dim=self.token_emb_size
         )
 
-        self.ff = FeedForward(emb_dim_size=self.n_self_attention_heads*self.head_size)
+        self.feed_forward = FeedForward(emb_dim_size=self.n_self_attention_heads*self.head_size) # for understanding I've written it as self.n_self_attention_heads*self.head_size which is equal to token_emb_size
+
+        self.transformer_blocks = nn.Sequential(
+            TransformerBlock(config),
+            TransformerBlock(config),
+            TransformerBlock(config),
+            TransformerBlock(config),
+        ) # using 4 transformer blocks
 
         self.linear_layer = nn.Linear(self.n_self_attention_heads*self.head_size, self.n_tokens) # but to compare to the final output, we would need n_tokens dimension
 
@@ -154,16 +182,19 @@ class GPT(nn.Module):
         # so the shape of logits become (batch_size, chunk_size, embedding_dim)
         # embedding_dim for our case is n_tokens
 
-        token_embeddings = self.token_embedding_table(x) # shape of the token_embeddings will be (batch_size, chunk_size, one_token_emb_size)
+        token_embeddings = self.token_embedding_table(x) # shape of the token_embeddings will be (batch_size, chunk_size, token_emb_size)
 
 
-        position_embeddings = self.position_embedding_table(torch.arange(self.chunk_size)) # shape is (chunk_size, one_token_emb_size)
+        position_embeddings = self.position_embedding_table(torch.arange(self.chunk_size)) # shape is (chunk_size, token_emb_size)
 
-        token_embeddings = token_embeddings + position_embeddings # shape is (batch_size, chunk_size, one_token_emb_size)
+        token_embeddings = token_embeddings + position_embeddings # shape is (batch_size, chunk_size, token_emb_size)
     
-        contextualised_embeddings = self.attention_layer(token_embeddings)
+        # contextualised_embeddings = self.attention_layer(token_embeddings)
 
-        ff_output = self.ff(contextualised_embeddings)
+        contextualised_embeddings = self.transformer_blocks(token_embeddings)
+
+
+        ff_output = self.feed_forward(contextualised_embeddings)
 
         logits = self.linear_layer(ff_output)# shape of the logits will be (batch_size, chunk_size, n_tokens)
 
@@ -174,7 +205,7 @@ class GPT(nn.Module):
         if y is not None:
             #reshape because pytorch expects it like that
             batch_size, chunk_size, n_tokens = logits.shape
-            #TODO: see why logits.view(batch_size, chunk_size, one_token_emb_size) was producing higher loss 4.4 vs 2.5
+            #TODO: see why logits.view(batch_size, chunk_size, token_emb_size) was producing higher loss 4.4 vs 2.5
             logits = logits.view(batch_size*chunk_size, n_tokens)
             y = y.view(-1)
             loss = F.cross_entropy(logits, y)
